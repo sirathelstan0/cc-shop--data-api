@@ -1,3 +1,4 @@
+import os
 from flask import Flask, jsonify, request
 import requests
 import random
@@ -89,7 +90,7 @@ def get_random_cards(count=10, max_workers=20, deadline_seconds=4.0):
                     break
     return cards[:count]
 
-# ---------- Single BIN endpoint ----------
+# ---------- Endpoints ----------
 @app.route("/bins/<bin_number>", methods=["GET"])
 def bin_with_price(bin_number):
     ok, reason = is_valid_bin(bin_number)
@@ -113,7 +114,6 @@ def bin_with_price(bin_number):
     data["amount"] = price
     return jsonify(data)
 
-# ---------- Explore endpoint ----------
 @app.route("/explore", methods=["GET"])
 def explore():
     try:
@@ -131,7 +131,15 @@ def explore():
         "cards": cards
     })
 
-# ---------- NEW: /doc — API documentation page ----------
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({
+        "status": "ok",
+        "message": "BIN API is running",
+        "endpoints": ["/bins/<bin>", "/explore", "/doc"]
+    })
+
+# ---------- /doc (same as before) ----------
 @app.route("/doc", methods=["GET"])
 def api_docs():
     html = """<!DOCTYPE html>
@@ -172,88 +180,49 @@ def api_docs():
   <h1>💳 BIN API</h1>
   <p class="subtitle">VISA &amp; Mastercard BIN lookup with pricing. Only 6-digit BINs starting with 2, 4, or 5 are supported.</p>
 
-  <!-- /bins/{bin} -->
   <div class="endpoint">
-    <div class="method-row">
-      <span class="method">GET</span>
-      <span class="path">/bins/{bin}</span>
-      <span class="badge">6-digit</span>
-    </div>
-    <p class="desc">Look up a single BIN. Returns brand, bank, country, level, type and calculated price. Only VISA and MASTERCARD allowed.</p>
-
+    <div class="method-row"><span class="method">GET</span><span class="path">/bins/{bin}</span><span class="badge">6-digit</span></div>
+    <p class="desc">Look up a single BIN. Returns brand, bank, country, level, type and calculated price.</p>
     <div class="section-title">Path Parameters</div>
-    <table>
-      <tr><th>Name</th><th>Type</th><th>Description</th></tr>
-      <tr><td><code>bin</code></td><td>string</td><td>Exactly 6 digits. Must start with 2, 4 or 5.</td></tr>
-    </table>
-
-    <div class="section-title">Example Request</div>
-    <pre>GET /bins/521068</pre>
-
+    <table><tr><th>Name</th><th>Type</th><th>Description</th></tr>
+      <tr><td><code>bin</code></td><td>string</td><td>Exactly 6 digits. Must start with 2, 4 or 5.</td></tr></table>
+    <div class="section-title">Example Request</div><pre>GET /bins/521068</pre>
     <div class="section-title">Example Response (200)</div>
     <pre>{
-  "bin": "521068",
-  "brand": "MASTERCARD",
-  "country": "BO",
-  "country_name": "BOLIVIA",
-  "country_flag": "🇧🇴",
+  "bin": "521068", "brand": "MASTERCARD", "country": "BO",
+  "country_name": "BOLIVIA", "country_flag": "🇧🇴",
   "country_currencies": ["BOB"],
   "bank": "ADMINISTRADORA DE TARJETAS DE CREDITO, (A.T.C.), S.A.",
-  "level": "BLACK",
-  "type": "CREDIT",
-  "price": "$2.50",
-  "amount": "$2.50"
+  "level": "BLACK", "type": "CREDIT",
+  "price": "$2.50", "amount": "$2.50"
 }</pre>
-
     <div class="section-title">Not Found (404)</div>
-    <pre>{
-  "status": "not_found",
-  "message": "BIN must be exactly 6 digits",
-  "bin": "12345"
-}</pre>
-
+    <pre>{"status":"not_found","message":"BIN must be exactly 6 digits","bin":"12345"}</pre>
     <button class="try-btn" onclick="tryBins()">Try it</button>
     <div id="bins-resp" class="response-box"></div>
   </div>
 
-  <!-- /explore -->
   <div class="endpoint">
-    <div class="method-row">
-      <span class="method">GET</span>
-      <span class="path">/explore</span>
-      <span class="badge">random</span>
-    </div>
-    <p class="desc">Returns 10 random valid VISA/Mastercard cards with prices, fetched in parallel (~2-4 sec).</p>
-
+    <div class="method-row"><span class="method">GET</span><span class="path">/explore</span><span class="badge">random</span></div>
+    <p class="desc">Returns 10 random valid VISA/Mastercard cards with prices, fetched in parallel.</p>
     <div class="section-title">Query Parameters</div>
-    <table>
-      <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
-      <tr><td><code>page</code></td><td>integer</td><td>no</td><td>Page number (default 1). For metadata only.</td></tr>
-    </table>
-
-    <div class="section-title">Example Request</div>
-    <pre>GET /explore?page=1</pre>
-
+    <table><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+      <tr><td><code>page</code></td><td>integer</td><td>no</td><td>Page number (default 1).</td></tr></table>
+    <div class="section-title">Example Request</div><pre>GET /explore?page=1</pre>
     <div class="section-title">Example Response (200)</div>
     <pre>{
-  "status": "ok",
-  "page": 1,
-  "count": 10,
+  "status": "ok", "page": 1, "count": 10,
   "cards": [
     { "bin": "521068", "brand": "MASTERCARD", "price": "$2.50", ... },
     { "bin": "414027", "brand": "VISA", "price": "$2.88", ... }
   ]
 }</pre>
-
     <button class="try-btn" onclick="tryExplore()">Try it</button>
     <div id="explore-resp" class="response-box"></div>
   </div>
 
-  <p style="text-align:center; color:var(--muted); margin-top:2rem; font-size:0.85rem;">
-    Built with Flask · Data source: bins.antipublic.cc
-  </p>
+  <p style="text-align:center; color:var(--muted); margin-top:2rem; font-size:0.85rem;">Built with Flask · Data source: bins.antipublic.cc</p>
 </div>
-
 <script>
 async function callApi(url, targetId) {
   const box = document.getElementById(targetId);
@@ -272,9 +241,7 @@ function tryBins() {
   const bin = prompt("Enter 6-digit BIN (e.g. 521068):", "521068");
   if (bin) callApi("/bins/" + bin, "bins-resp");
 }
-function tryExplore() {
-  callApi("/explore", "explore-resp");
-}
+function tryExplore() { callApi("/explore", "explore-resp"); }
 </script>
 </body>
 </html>"""
@@ -282,4 +249,5 @@ function tryExplore() {
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True, threaded=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
