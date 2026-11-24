@@ -1,384 +1,285 @@
 from flask import Flask, jsonify, request
 import requests
-import json
-from datetime import datetime
+import random
+from functools import lru_cache
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
 
-# ==================== CONFIGURATION ====================
-API_URL = "https://api.pepecards2f7z1qtyyg.top/v1/goods/lists"
+# ---------- Price logic ----------
+def get_bin_price(bin_number):
+    digits = [int(d) for d in str(bin_number) if d.isdigit()]
+    if not digits:
+        return "$0.00"
+    total = sum(digit * (index + 3) for index, digit in enumerate(digits))
+    price = 2 + (total % 101) / 100
+    return f"${price:.2f}"
 
-HEADERS = {
-    "accept": "application/json, text/plain, */*",
-    "content-type": "application/json",
-    "lang": "en",
-    "origin": "https://api.pepecards2f7z1qtyyg.top",
-    "referer": "https://api.pepecards2f7z1qtyyg.top/",
-    "token": "f551e65b-4599-4789-a450-551b3b81f5bf",
-    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-}
+# ---------- Validation ----------
+def is_valid_bin(bin_number):
+    if not bin_number.isdigit():
+        return False, "BIN must contain only digits"
+    if len(bin_number) != 6:
+        return False, "BIN must be exactly 6 digits"
+    if bin_number[0] not in ("2", "4", "5"):
+        return False, "Only VISA and MASTERCARD BINs are supported"
+    return True, None
 
-# ==================== COUNTRY FLAGS ====================
-COUNTRY_FLAGS = {
-    "PH": "🇵🇭", "US": "🇺🇸", "GB": "🇬🇧", "FR": "🇫🇷", "DE": "🇩🇪",
-    "IT": "🇮🇹", "ES": "🇪🇸", "PT": "🇵🇹", "NL": "🇳🇱", "BE": "🇧🇪",
-    "IE": "🇮🇪", "TR": "🇹🇷", "AR": "🇦🇷", "BR": "🇧🇷", "MX": "🇲🇽",
-    "CA": "🇨🇦", "AU": "🇦🇺", "IN": "🇮🇳", "JP": "🇯🇵", "CN": "🇨🇳",
-    "RU": "🇷🇺", "ZA": "🇿🇦", "NG": "🇳🇬", "EG": "🇪🇬", "SA": "🇸🇦",
-    "AE": "🇦🇪", "SG": "🇸🇬", "MY": "🇲🇾", "ID": "🇮🇩", "TH": "🇹🇭",
-    "VN": "🇻🇳", "KR": "🇰🇷", "PK": "🇵🇰", "BD": "🇧🇩", "KE": "🇰🇪"
-}
+# ---------- BIN lookup ----------
+BIN_API = "https://bins.antipublic.cc/bins/{bin}"
 
-# ==================== SAFE GET FUNCTION ====================
-def safe_get(obj, *keys, default="N/A"):
-    """Safely get nested dictionary values"""
-    for key in keys:
-        try:
-            if obj is None:
-                return default
-            obj = obj.get(key, default) if isinstance(obj, dict) else default
-        except (AttributeError, TypeError):
-            return default
-    return obj if obj is not None else default
-
-def safe_card_value(card, *keys, default="N/A"):
-    """Safely get value from card object"""
+@lru_cache(maxsize=4096)
+def fetch_bin_data(bin_number):
     try:
-        value = card
-        for key in keys:
-            if value is None:
-                return default
-            if isinstance(value, dict):
-                value = value.get(key, default)
-            else:
-                return default
-        return value if value is not None else default
-    except (AttributeError, TypeError):
-        return default
-
-# ==================== API FUNCTIONS ====================
-def fetch_cards(bin_number, page=1, page_size=10):
-    """Fetch cards from API"""
-    payload = {
-        "page": page,
-        "pageSize": page_size,
-        "bins": bin_number
-    }
-    
-    try:
-        response = requests.post(API_URL, headers=HEADERS, json=payload, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("ResCode") == 1:
-                return data.get("ResData", {})
+        r = requests.get(BIN_API.format(bin=bin_number), timeout=6)
+        if r.status_code == 200:
+            return r.json()
         return None
-    except Exception as e:
-        print(f"API Error: {e}")
+    except Exception:
         return None
 
-def process_cards_data(card_data, bin_number):
-    """Process and organize card data with analysis"""
-    if not card_data or not card_data.get("data"):
-        return None
-    
-    cards = card_data.get("data", [])
-    
-    # Filter out None cards
-    cards = [c for c in cards if c is not None]
-    
-    if not cards:
-        return None
-    
-    total = card_data.get("total", 0)
-    current_page = int(card_data.get("current_page", 1))
-    last_page = int(card_data.get("last_page", 1))
-    
-    # ========== PRICE ANALYSIS ==========
-    prices = []
-    for card in cards:
-        try:
-            price = float(safe_card_value(card, "price", default="0"))
-            if price > 0:
-                prices.append(price)
-        except (ValueError, TypeError):
-            continue
-    
-    min_price = min(prices) if prices else 0
-    max_price = max(prices) if prices else 0
-    avg_price = round(sum(prices) / len(prices), 2) if prices else 0
-    
-    # ========== REFUNDABLE ANALYSIS ==========
-    refundable = [c for c in cards if safe_card_value(c, "is_refund", default=0) == 1]
-    non_refundable = [c for c in cards if safe_card_value(c, "is_refund", default=0) == 0]
-    
-    # ========== STOCK ANALYSIS ==========
-    in_cart = [c for c in cards if safe_card_value(c, "in_cart", default=0) == 1]
-    available = [c for c in cards if safe_card_value(c, "in_cart", default=0) == 0]
-    
-    # ========== BANK ANALYSIS ==========
-    banks = {}
-    for card in cards:
-        bank_name = safe_card_value(card, "bankinfo", "bank_name", default="Unknown")
-        if bank_name not in banks:
-            banks[bank_name] = 0
-        banks[bank_name] += 1
-    
-    # ========== SELLER ANALYSIS ==========
-    sellers = {}
-    for card in cards:
-        seller = safe_card_value(card, "baseinfo", "seller_nickname", default="Unknown")
-        if seller not in sellers:
-            sellers[seller] = 0
-        sellers[seller] += 1
-    
-    # ========== NEWEST BASE ==========
-    newest_base = None
-    if cards:
-        first_card = cards[0]
-        newest_base = {
-            "id": safe_card_value(first_card, "id", default="N/A"),
-            "name": safe_card_value(first_card, "baseinfo", "name", default="N/A"),
-            "seller": safe_card_value(first_card, "baseinfo", "seller_nickname", default="N/A"),
-            "sname": safe_card_value(first_card, "sname", default="N/A"),
-            "price": safe_card_value(first_card, "price", default="N/A")
-        }
-    
-    # ========== FORMAT CARDS WITH FLAGS ==========
-    formatted_cards = []
-    for card in cards:
-        country_code = safe_card_value(card, "countryinfo", "code", default="")
-        flag = COUNTRY_FLAGS.get(country_code, "🌍")
-        
-        formatted_cards.append({
-            "id": safe_card_value(card, "id", default="N/A"),
-            "bin": safe_card_value(card, "bin", default="N/A"),
-            "price": float(safe_card_value(card, "price", default="0")),
-            "currency": "USD",
-            "type": safe_card_value(card, "type", default="N/A"),
-            "network": safe_card_value(card, "typeinfo", "name", default="N/A"),
-            "bank": safe_card_value(card, "bankinfo", "bank_name", default="N/A"),
-            "city": safe_card_value(card, "city", default="N/A"),
-            "state": safe_card_value(card, "state", default="N/A"),
-            "country": safe_card_value(card, "countryinfo", "country_name", default="N/A"),
-            "country_code": country_code,
-            "flag": flag,
-            "seller": safe_card_value(card, "baseinfo", "seller_nickname", default="N/A"),
-            "in_cart": safe_card_value(card, "in_cart", default=0) == 1,
-            "is_refundable": safe_card_value(card, "is_refund", default=0) == 1,
-            "discount": float(safe_card_value(card, "nock_discount", default="0")),
-            "has_email": safe_card_value(card, "email", default=False) == True,
-            "has_phone": safe_card_value(card, "phone", default=False) == True,
-            "has_address": safe_card_value(card, "full_address", default=False) == True,
-            "has_zip": safe_card_value(card, "zip", default=False) == True
-        })
-    
-    # ========== RETURN COMPLETE DATA ==========
-    return {
-        "bin": bin_number,
-        "total_cards": total,
-        "current_page": current_page,
-        "last_page": last_page,
-        "fetch_timestamp": datetime.now().isoformat(),
-        "status": "success",
-        "message": f"Found {len(cards)} cards for BIN {bin_number}",
-        
-        # ========== SUMMARY PEHLE ==========
-        "summary": {
-            "price_analysis": {
-                "min_price": min_price,
-                "max_price": max_price,
-                "avg_price": avg_price,
-                "total_cards_analyzed": len(prices)
-            },
-            "refundable": {
-                "yes": len(refundable),
-                "no": len(non_refundable)
-            },
-            "stock_status": {
-                "available": len(available),
-                "in_cart": len(in_cart)
-            },
-            "banks": banks,
-            "sellers": sellers,
-            "newest_base": newest_base
-        },
-        
-        # ========== CARDS BAAD MEIN ==========
-        "cards": formatted_cards
-    }
+# ---------- Random BIN generator ----------
+def random_visa_bin():
+    return "4" + "".join(str(random.randint(0, 9)) for _ in range(5))
 
-# ==================== API ENDPOINTS ====================
+def random_mastercard_bin():
+    first = random.choice(["5", "2"])
+    return first + "".join(str(random.randint(0, 9)) for _ in range(5))
 
-@app.route('/search/<bin_number>', methods=['GET'])
-def search_bin(bin_number):
-    """Search by BIN only"""
-    if not bin_number.isdigit() or len(bin_number) < 6:
-        return jsonify({
-            "error": "Invalid BIN number",
-            "message": "BIN must be 6-8 digits",
-            "status": 400
-        }), 400
-    
-    data = fetch_cards(bin_number, page=1)
+def random_bin():
+    return random.choice([random_visa_bin, random_mastercard_bin])()
+
+def fetch_one_card(bin_num):
+    data = fetch_bin_data(bin_num)
     if not data:
-        return jsonify({
-            "error": "No data found",
-            "message": f"No cards found for BIN {bin_number}",
-            "status": 404
-        }), 404
-    
-    processed_data = process_cards_data(data, bin_number)
-    
-    if not processed_data:
-        return jsonify({
-            "error": "No valid cards found",
-            "message": f"No valid cards found for BIN {bin_number}",
-            "status": 404
-        }), 404
-    
-    return jsonify(processed_data)
+        return None
+    brand = (data.get("brand") or "").upper()
+    if brand not in ("VISA", "MASTERCARD"):
+        return None
+    price = get_bin_price(bin_num)
+    data["price"] = price
+    data["amount"] = price
+    return data
 
+def get_random_cards(count=10, max_workers=20, deadline_seconds=4.0):
+    import time
+    start = time.time()
+    cards = []
+    seen = set()
 
-@app.route('/search/<bin_number>/<int:page>', methods=['GET'])
-def search_bin_page(bin_number, page):
-    """Search by BIN with page number"""
-    if not bin_number.isdigit() or len(bin_number) < 6:
+    candidate_pool = []
+    while len(candidate_pool) < count * 4:
+        b = random_bin()
+        if b not in seen:
+            seen.add(b)
+            candidate_pool.append(b)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(fetch_one_card, b): b for b in candidate_pool}
+        for fut in as_completed(futures, timeout=deadline_seconds + 2):
+            if time.time() - start > deadline_seconds and len(cards) >= count // 2:
+                break
+            try:
+                result = fut.result(timeout=0.1)
+            except Exception:
+                continue
+            if result:
+                cards.append(result)
+                if len(cards) >= count:
+                    break
+    return cards[:count]
+
+# ---------- Single BIN endpoint ----------
+@app.route("/bins/<bin_number>", methods=["GET"])
+def bin_with_price(bin_number):
+    ok, reason = is_valid_bin(bin_number)
+    if not ok:
+        return jsonify({"status": "not_found", "message": reason, "bin": bin_number}), 404
+
+    data = fetch_bin_data(bin_number)
+    if not data:
+        return jsonify({"status": "not_found", "message": "BIN not found", "bin": bin_number}), 404
+
+    brand = (data.get("brand") or "").upper()
+    if brand not in ("VISA", "MASTERCARD"):
         return jsonify({
-            "error": "Invalid BIN number",
-            "message": "BIN must be 6-8 digits",
-            "status": 400
-        }), 400
-    
+            "status": "not_found",
+            "message": "Only VISA and MASTERCARD BINs are supported",
+            "bin": bin_number
+        }), 404
+
+    price = get_bin_price(bin_number)
+    data["price"] = price
+    data["amount"] = price
+    return jsonify(data)
+
+# ---------- Explore endpoint ----------
+@app.route("/explore", methods=["GET"])
+def explore():
+    try:
+        page = int(request.args.get("page", 1))
+    except ValueError:
+        page = 1
     if page < 1:
-        return jsonify({
-            "error": "Invalid page number",
-            "message": "Page must be >= 1",
-            "status": 400
-        }), 400
-    
-    data = fetch_cards(bin_number, page=page)
-    if not data:
-        return jsonify({
-            "error": "No data found",
-            "message": f"No cards found for BIN {bin_number} on page {page}",
-            "status": 404
-        }), 404
-    
-    processed_data = process_cards_data(data, bin_number)
-    
-    if not processed_data:
-        return jsonify({
-            "error": "No valid cards found",
-            "message": f"No valid cards found for BIN {bin_number} on page {page}",
-            "status": 404
-        }), 404
-    
-    return jsonify(processed_data)
+        page = 1
 
-
-@app.route('/search/<bin_number>/all', methods=['GET'])
-def search_all_pages(bin_number):
-    """Fetch all pages for a BIN (max 10 pages)"""
-    if not bin_number.isdigit() or len(bin_number) < 6:
-        return jsonify({
-            "error": "Invalid BIN number",
-            "message": "BIN must be 6-8 digits",
-            "status": 400
-        }), 400
-    
-    # First fetch to get total pages
-    first_page = fetch_cards(bin_number, page=1)
-    if not first_page:
-        return jsonify({
-            "error": "No data found",
-            "message": f"No cards found for BIN {bin_number}",
-            "status": 404
-        }), 404
-    
-    total_pages = int(first_page.get("last_page", 1))
-    all_cards = []
-    
-    # Fetch all pages (max 10 pages to avoid timeout)
-    max_pages = min(total_pages, 10)
-    for page in range(1, max_pages + 1):
-        data = fetch_cards(bin_number, page=page)
-        if data and data.get("data"):
-            cards = data.get("data", [])
-            if cards:
-                all_cards.extend(cards)
-    
-    if not all_cards:
-        return jsonify({
-            "error": "No cards found",
-            "message": f"No cards found for BIN {bin_number}",
-            "status": 404
-        }), 404
-    
-    # Create combined response
-    combined_data = {
-        "current_page": 1,
-        "last_page": max_pages,
-        "total": len(all_cards),
-        "data": all_cards
-    }
-    
-    processed_data = process_cards_data(combined_data, bin_number)
-    
-    if not processed_data:
-        return jsonify({
-            "error": "No valid cards found",
-            "message": f"No valid cards found for BIN {bin_number}",
-            "status": 404
-        }), 404
-    
-    return jsonify(processed_data)
-
-
-@app.route('/api/status', methods=['GET'])
-def status():
-    """Check API status"""
+    cards = get_random_cards(count=10)
     return jsonify({
-        "status": "online",
-        "timestamp": datetime.now().isoformat(),
-        "version": "1.0.2",
-        "endpoints": {
-            "/search/{bin}": "Search by BIN (summary first)",
-            "/search/{bin}/{page}": "Search by BIN with page",
-            "/search/{bin}/all": "Fetch all pages (max 10)"
-        }
+        "status": "ok",
+        "page": page,
+        "count": len(cards),
+        "cards": cards
     })
 
+# ---------- NEW: /doc — API documentation page ----------
+@app.route("/doc", methods=["GET"])
+def api_docs():
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BIN API — Documentation</title>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --border:#30363d; --txt:#c9d1d9; --muted:#8b949e; --accent:#58a6ff; --green:#3fb950; --red:#f85149; --yellow:#d29922; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--txt); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.6; padding: 2rem 1rem; }
+  .container { max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 2rem; margin-bottom: 0.5rem; color: #fff; }
+  .subtitle { color: var(--muted); margin-bottom: 2rem; }
+  .endpoint { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; }
+  .method-row { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem; flex-wrap: wrap; }
+  .method { font-weight: 700; font-size: 0.85rem; padding: 0.25rem 0.75rem; border-radius: 6px; background: #1f6feb; color: white; }
+  .path { font-family: "SF Mono", Monaco, monospace; font-size: 1rem; color: var(--accent); }
+  .desc { color: var(--muted); margin-bottom: 1rem; }
+  .section-title { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin: 1rem 0 0.5rem; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; }
+  code { font-family: "SF Mono", Monaco, monospace; background: #1f242c; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.85em; color: #ffa657; }
+  pre { background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 1rem; overflow-x: auto; font-size: 0.85rem; font-family: "SF Mono", Monaco, monospace; color: var(--txt); }
+  .try-btn { background: #238636; color: white; border: none; padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; font-weight: 600; }
+  .try-btn:hover { background: #2ea043; }
+  .response-box { margin-top: 0.75rem; display: none; }
+  .response-box.show { display: block; }
+  .status-ok { color: var(--green); }
+  .status-err { color: var(--red); }
+  .badge { display:inline-block; font-size:0.75rem; padding:0.15rem 0.5rem; border-radius:4px; background:#1f242c; color:var(--yellow); margin-left:0.5rem; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>💳 BIN API</h1>
+  <p class="subtitle">VISA &amp; Mastercard BIN lookup with pricing. Only 6-digit BINs starting with 2, 4, or 5 are supported.</p>
 
-@app.errorhandler(404)
-def not_found(e):
-    return jsonify({
-        "error": "Endpoint not found",
-        "status": 404
-    }), 404
+  <!-- /bins/{bin} -->
+  <div class="endpoint">
+    <div class="method-row">
+      <span class="method">GET</span>
+      <span class="path">/bins/{bin}</span>
+      <span class="badge">6-digit</span>
+    </div>
+    <p class="desc">Look up a single BIN. Returns brand, bank, country, level, type and calculated price. Only VISA and MASTERCARD allowed.</p>
+
+    <div class="section-title">Path Parameters</div>
+    <table>
+      <tr><th>Name</th><th>Type</th><th>Description</th></tr>
+      <tr><td><code>bin</code></td><td>string</td><td>Exactly 6 digits. Must start with 2, 4 or 5.</td></tr>
+    </table>
+
+    <div class="section-title">Example Request</div>
+    <pre>GET /bins/521068</pre>
+
+    <div class="section-title">Example Response (200)</div>
+    <pre>{
+  "bin": "521068",
+  "brand": "MASTERCARD",
+  "country": "BO",
+  "country_name": "BOLIVIA",
+  "country_flag": "🇧🇴",
+  "country_currencies": ["BOB"],
+  "bank": "ADMINISTRADORA DE TARJETAS DE CREDITO, (A.T.C.), S.A.",
+  "level": "BLACK",
+  "type": "CREDIT",
+  "price": "$2.50",
+  "amount": "$2.50"
+}</pre>
+
+    <div class="section-title">Not Found (404)</div>
+    <pre>{
+  "status": "not_found",
+  "message": "BIN must be exactly 6 digits",
+  "bin": "12345"
+}</pre>
+
+    <button class="try-btn" onclick="tryBins()">Try it</button>
+    <div id="bins-resp" class="response-box"></div>
+  </div>
+
+  <!-- /explore -->
+  <div class="endpoint">
+    <div class="method-row">
+      <span class="method">GET</span>
+      <span class="path">/explore</span>
+      <span class="badge">random</span>
+    </div>
+    <p class="desc">Returns 10 random valid VISA/Mastercard cards with prices, fetched in parallel (~2-4 sec).</p>
+
+    <div class="section-title">Query Parameters</div>
+    <table>
+      <tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr>
+      <tr><td><code>page</code></td><td>integer</td><td>no</td><td>Page number (default 1). For metadata only.</td></tr>
+    </table>
+
+    <div class="section-title">Example Request</div>
+    <pre>GET /explore?page=1</pre>
+
+    <div class="section-title">Example Response (200)</div>
+    <pre>{
+  "status": "ok",
+  "page": 1,
+  "count": 10,
+  "cards": [
+    { "bin": "521068", "brand": "MASTERCARD", "price": "$2.50", ... },
+    { "bin": "414027", "brand": "VISA", "price": "$2.88", ... }
+  ]
+}</pre>
+
+    <button class="try-btn" onclick="tryExplore()">Try it</button>
+    <div id="explore-resp" class="response-box"></div>
+  </div>
+
+  <p style="text-align:center; color:var(--muted); margin-top:2rem; font-size:0.85rem;">
+    Built with Flask · Data source: bins.antipublic.cc
+  </p>
+</div>
+
+<script>
+async function callApi(url, targetId) {
+  const box = document.getElementById(targetId);
+  box.classList.add("show");
+  box.innerHTML = "<pre>Loading...</pre>";
+  try {
+    const res = await fetch(url);
+    const text = await res.text();
+    const cls = res.ok ? "status-ok" : "status-err";
+    box.innerHTML = `<div class="${cls}">Status: ${res.status}</div><pre>${text}</pre>`;
+  } catch (e) {
+    box.innerHTML = `<div class="status-err">Error: ${e.message}</div>`;
+  }
+}
+function tryBins() {
+  const bin = prompt("Enter 6-digit BIN (e.g. 521068):", "521068");
+  if (bin) callApi("/bins/" + bin, "bins-resp");
+}
+function tryExplore() {
+  callApi("/explore", "explore-resp");
+}
+</script>
+</body>
+</html>"""
+    return html
 
 
-@app.errorhandler(500)
-def server_error(e):
-    return jsonify({
-        "error": "Internal server error",
-        "status": 500
-    }), 500
-
-
-# ==================== MAIN ====================
-if __name__ == '__main__':
-    print("🚀 Starting CC Shop API...")
-    print("📍 Base URL: http://127.0.0.1:5000")
-    print("")
-    print("📌 Available Endpoints:")
-    print("  GET /search/{bin}")
-    print("  GET /search/{bin}/{page}")
-    print("  GET /search/{bin}/all")
-    print("  GET /api/status")
-    print("")
-    print("🔍 Example:")
-    print("  http://127.0.0.1:5000/search/521069")
-    print("  http://127.0.0.1:5000/search/521069/2")
-    print("  http://127.0.0.1:5000/search/521069/all")
-    print("")
-    app.run(debug=True, host='0.0.0.0', port=5000)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True, threaded=True)
